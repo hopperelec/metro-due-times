@@ -9,87 +9,143 @@ import NETWORK_GRAPH from './pop-network.json';
 import fs from "fs/promises";
 import {StationCode, LocationCode, FullStateKey, PathKey, TimeDeltaKey} from "./types";
 import proxy, {apiConstants, getStationCode, reloadApiConstants} from "./proxy";
+import {MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
+import {findMostFrequentKeyInFrequencyMap, getOrSet, toLocationCode} from "./utils";
 
-interface ConsistentLastSeen {
-    state: ActiveTrainState
+class FullState {
+    state: ActiveTrainState;
     stationCode: StationCode;
     platform: PlatformNumber;
     date: Date;
-}
-
-function toLocationCode(stationCode: StationCode, platform: PlatformNumber): LocationCode {
-    return `${stationCode}_${platform}`;
-}
-
-function toFullStateKey(lastSeen: ConsistentLastSeen): FullStateKey {
-    return `${lastSeen.state}-${toLocationCode(lastSeen.stationCode, lastSeen.platform)}`;
-}
-
-async function formatTimesApi(event: TimesApiData['lastEvent']): Promise<ConsistentLastSeen> {
-    const { station, platform } = parseTimesAPILocation(event.location);
-    let state = event.type.toLowerCase().replaceAll('_', ' ');
-    state = state[0].toUpperCase() + state.slice(1); // Capitalize first letter
-    return {
-        state: state as ActiveTrainState,
-        stationCode: await getStationCode(station, platform),
-        platform,
-        date: event.time,
-    };
-}
-
-async function formatGeoApi(parsedLastSeen: ParsedLastSeen, date: Date): Promise<ConsistentLastSeen> {
-    return {
-        state: parsedLastSeen.state,
-        stationCode: await getStationCode(parsedLastSeen.station, parsedLastSeen.platform),
-        platform: parsedLastSeen.platform,
-        date,
-    };
-}
-
-function findMostFrequentKeyInFrequencyMap<T>(frequencyMap: Map<T, number>): T | null {
-    let mostFrequentKey: T | null = null;
-    let highestFrequency = 0;
-    for (const [key, frequency] of frequencyMap.entries()) {
-        if (frequency > highestFrequency) {
-            highestFrequency = frequency;
-            mostFrequentKey = key;
-        }
+    
+    constructor(state: ActiveTrainState, stationCode: StationCode, platform: PlatformNumber, date: Date) {
+        this.state = state;
+        this.stationCode = stationCode;
+        this.platform = platform;
+        this.date = date;
     }
-    return mostFrequentKey;
-}
+    
+    get locationCode(): LocationCode {
+        return toLocationCode(this.stationCode, this.platform);
+    }
 
-const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
-async function toConsistentLastSeen(status: ActiveTrainHistoryStatus, heartbeatDate: Date): Promise<ConsistentLastSeen> {
-    const timesApi = status.timesAPI?.lastEvent;
-    const geoApiString = status.trainStatusesAPI?.lastSeen;
+    get key(): FullStateKey {
+        return `${this.state}-${this.locationCode}`;
+    }
 
-    if (!geoApiString) {
+    static async fromActiveTrainHistoryStatus(status: ActiveTrainHistoryStatus, heartbeatDate: Date): Promise<FullState> {
+        const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+
+        async function formatTimesApi(event: TimesApiData['lastEvent']): Promise<FullState> {
+            const {station, platform} = parseTimesAPILocation(event.location);
+            let state = event.type.toLowerCase().replaceAll('_', ' ');
+            state = state[0].toUpperCase() + state.slice(1); // Capitalize first letter
+            return new FullState(
+                state as ActiveTrainState,
+                await getStationCode(station, platform),
+                platform,
+                event.time,
+            );
+        }
+
+        async function formatGeoApi(parsedLastSeen: ParsedLastSeen, date: Date): Promise<FullState> {
+            return new FullState(
+                parsedLastSeen.state,
+                await getStationCode(parsedLastSeen.station, parsedLastSeen.platform),
+                parsedLastSeen.platform,
+                date,
+            );
+        }
+
+        const timesApi = status.timesAPI?.lastEvent;
+        const geoApiString = status.trainStatusesAPI?.lastSeen;
+
+        if (!geoApiString) {
+            return formatTimesApi(timesApi);
+        }
+
+        const geoData = parseLastSeen(geoApiString);
+        const geoDate = new Date(heartbeatDate);
+        geoDate.setHours(geoData.hours, geoData.minutes, 0, 0);
+
+        // Adjust geoDate to be within 12 hours of heartbeatDate
+        const diff = geoDate.getTime() - heartbeatDate.getTime();
+        if (diff < -TWELVE_HOURS_MS) {
+            geoDate.setDate(geoDate.getDate() + 1);
+        } else if (diff > TWELVE_HOURS_MS) {
+            geoDate.setDate(geoDate.getDate() - 1);
+        }
+
+        if (!timesApi || geoDate.getTime() > timesApi.time.getTime()) {
+            return formatGeoApi(geoData, geoDate);
+        }
         return formatTimesApi(timesApi);
     }
-
-    const geoData = parseLastSeen(geoApiString);
-    const geoDate = new Date(heartbeatDate);
-    geoDate.setHours(geoData.hours, geoData.minutes, 0, 0);
-
-    // Adjust geoDate to be within 12 hours of heartbeatDate
-    const diff = geoDate.getTime() - heartbeatDate.getTime();
-    if (diff < -TWELVE_HOURS_MS) {
-        geoDate.setDate(geoDate.getDate() + 1);
-    } else if (diff > TWELVE_HOURS_MS) {
-        geoDate.setDate(geoDate.getDate() - 1);
-    }
-
-    if (!timesApi || geoDate.getTime() > timesApi.time.getTime()) {
-        return formatGeoApi(geoData, geoDate);
-    }
-    return formatTimesApi(timesApi);
 }
 
-function getOrSet<K, V>(map: Map<K, V>, key: K, defaultValue: V): V {
-    if (!map.has(key)) {
-        map.set(key, defaultValue);
+// TimeDeltaKey -> List of time deltas (in ms)
+class TimeDeltaMap extends Map<TimeDeltaKey, number[]> {
+    addDelta(key: TimeDeltaKey, delta: number) {
+        getOrSet(this, key, []).push(delta);
     }
-    return map.get(key)!;
+
+    computeMedians(): MedianTimeDeltas {
+        const medianMap = new MedianTimeDeltas();
+        for (const [key, deltas] of this.entries()) {
+            deltas.sort((a, b) => a - b);
+            const mid = Math.floor(deltas.length / 2);
+            const median = deltas.length % 2 !== 0 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
+            medianMap.set(key, median);
+        }
+        return medianMap;
+    }
+}
+
+// Current location -> Destination -> Path -> Frequency
+class PathFrequencyMatrix extends Map<StationCode, Map<StationCode, Map<PathKey, number>>> {
+    addPath(from: StationCode, to: StationCode, path: PathKey) {
+        const destinationToPathFrequencies = getOrSet(this, from, new Map());
+        const pathFrequencies = getOrSet(destinationToPathFrequencies, to, new Map());
+        pathFrequencies.set(path, (pathFrequencies.get(path) || 0) + 1);
+    }
+
+    computeUsualPaths(): UsualPaths {
+        const usualPaths = new UsualPaths();
+        for (const [from, destinationToPathFrequencies] of this.entries()) {
+            for (const [to, pathFrequencies] of destinationToPathFrequencies.entries()) {
+                const usualPath = findMostFrequentKeyInFrequencyMap(pathFrequencies);
+                if (usualPath) {
+                    usualPaths.setUsualPath(from, to, usualPath);
+                }
+            }
+        }
+        return usualPaths;
+    }
+}
+
+// Starting location -> Current location -> Final destination -> Frequency
+class DestinationFrequencyMatrix extends Map<LocationCode, Map<LocationCode, Map<LocationCode, number>>> {
+    addDestinationFrequency(startingLocation: LocationCode, currentLocation: LocationCode, destination: LocationCode) {
+        const currentLocationMap = getOrSet(this, startingLocation, new Map());
+        const destinationFrequencies = getOrSet(currentLocationMap, currentLocation, new Map());
+        destinationFrequencies.set(
+            destination,
+            (destinationFrequencies.get(destination) || 0) + 1
+        );
+    }
+
+    computeUsualDestinations(): UsualDestinations {
+        const usualDestinations = new UsualDestinations();
+        for (const [startingLocation, currentLocationMap] of this.entries()) {
+            for (const [currentLocation, destinationFrequencies] of currentLocationMap.entries()) {
+                const usualDestination = findMostFrequentKeyInFrequencyMap(destinationFrequencies);
+                if (usualDestination) {
+                    usualDestinations.setUsualDestination(startingLocation, currentLocation, usualDestination);
+                }
+            }
+        }
+        return usualDestinations;
+    }
 }
 
 async function main() {
@@ -100,13 +156,13 @@ async function main() {
     const historySummary = await proxy.getHistorySummary();
 
     console.log(`Fetched history summary. Fetching and processing history for all ${Object.keys(historySummary.trains).length} TRNs...`);
-    const allTimeDeltas = new Map<TimeDeltaKey, number[]>();
-    const pathFrequencyMatrix = new Map<StationCode, Map<StationCode, Map<PathKey, number>>>(); // Current location -> Destination -> Path -> Frequency
-    const destinationFrequencyMatrix = new Map<LocationCode, Map<LocationCode, Map<LocationCode, number>>>(); // Starting location -> Current location -> Final destination -> Frequency
+    const allTimeDeltas = new TimeDeltaMap();
+    const pathFrequencyMatrix = new PathFrequencyMatrix();
+    const destinationFrequencyMatrix = new DestinationFrequencyMatrix();
     await Promise.all(
         Object.keys(historySummary.trains).map(async trn => {
             let latestTimestamp = new Date(0);
-            let currentJourney: ConsistentLastSeen[] = [];
+            let currentJourney: FullState[] = [];
             while (true) {
                 const history = await proxy.getTrainHistory(trn, {
                     time: { from: new Date(latestTimestamp.getTime() + 1) },
@@ -121,88 +177,71 @@ async function main() {
                         continue;
                     }
                     // Identify most recent/precise last seen
-                    let consistentLastSeen: ConsistentLastSeen;
+                    let fullState: FullState;
                     try {
-                        consistentLastSeen = await toConsistentLastSeen(entry.status, entry.date);
+                        fullState = await FullState.fromActiveTrainHistoryStatus(entry.status, entry.date);
                     } catch (error) {
                         // For example, unrecognized station
                         currentJourney = [];
                         continue;
                     }
-                    const locationCode = toLocationCode(consistentLastSeen.stationCode, consistentLastSeen.platform);
                     // Add current data to recent data
-                    currentJourney.push(consistentLastSeen);
+                    currentJourney.push(fullState);
                     // Analyze recent data for paths and destinations
                     if (currentJourney.length >= 2) {
                         const prevEntry = currentJourney[currentJourney.length - 2];
-                        const prevLocationCode = toLocationCode(prevEntry.stationCode, prevEntry.platform);
-                        if (locationCode === prevLocationCode) {
-                            if (consistentLastSeen.state === prevEntry.state) {
+                        const prevLocationCode = prevEntry.locationCode;
+                        if (fullState.locationCode === prevLocationCode) {
+                            if (fullState.state === prevEntry.state) {
                                 // Duplicate entry; skip entirely
                                 continue;
                             }
                         // Reset the current journey if the latest location is not adjacent to the last one
-                        } else if (!NETWORK_GRAPH[prevLocationCode]?.includes(locationCode)) {
+                        } else if (!NETWORK_GRAPH[prevLocationCode]?.includes(fullState.locationCode)) {
                             currentJourney = [];
                         // If the current station was seen recently, assume the previous location was a terminus
                         } else if (currentJourney.some(entry =>
-                                entry !== consistentLastSeen &&
-                                entry.stationCode === consistentLastSeen.stationCode
+                                entry !== fullState &&
+                                entry.stationCode === fullState.stationCode
                         )) {
-                            const startingLocationCode = toLocationCode(currentJourney[0].stationCode, currentJourney[0].platform);
+                            const startingLocationCode = currentJourney[0].locationCode;
                             // Add to destination frequencies for all previous recent locations
                             for (const recentLocation of currentJourney) {
-                                const recentLocationCode = toLocationCode(recentLocation.stationCode, recentLocation.platform);
-                                const currentLocationMap = getOrSet(
-                                    destinationFrequencyMatrix,
+                                const recentLocationCode = recentLocation.locationCode;
+                                destinationFrequencyMatrix.addDestinationFrequency(
                                     startingLocationCode,
-                                    new Map()
-                                );
-                                const destinationFrequencies = getOrSet(
-                                    currentLocationMap,
                                     recentLocationCode,
-                                    new Map()
-                                );
-                                destinationFrequencies.set(
-                                    prevLocationCode,
-                                    (destinationFrequencies.get(prevLocationCode) || 0) + 1
+                                    fullState.locationCode
                                 );
                             }
                             // Restart recent data from the last location
-                            currentJourney = [prevEntry, consistentLastSeen];
+                            currentJourney = [prevEntry, fullState];
                         }
                         // If the latest state is "Arrived", compare with all previous recent stations to build paths
                         for (let i = 0; i < currentJourney.length - 1; i++) {
                             const from = currentJourney[i];
-                            const fromLocationCode = toLocationCode(from.stationCode, from.platform);
-                            const to = consistentLastSeen;
+                            const fromLocationCode = from.locationCode;
+                            const to = fullState;
                             const journeyLocationCodes = currentJourney
                                 .slice(i + 1)
-                                .map(loc => toLocationCode(loc.stationCode, loc.platform))
+                                .map(loc => loc.locationCode)
                                 // Collapse consecutive duplicates
                                 .filter((code, index, arr) => index === 0 || code !== arr[index - 1]);
                             const pathKey = journeyLocationCodes.join("->");
                             // Add to path frequency matrix
                             if (fromLocationCode !== journeyLocationCodes[journeyLocationCodes.length - 1]) {
                                 // Path only depends on location, not on state
-                                const destinationToPathFrequencies = getOrSet(
-                                    pathFrequencyMatrix,
-                                    toLocationCode(from.stationCode, from.platform),
-                                    new Map()
-                                );
-                                const pathFrequencies = getOrSet(
-                                    destinationToPathFrequencies,
+                                pathFrequencyMatrix.addPath(
+                                    fromLocationCode,
                                     to.stationCode,
-                                    new Map()
+                                    pathKey
                                 );
-                                pathFrequencies.set(pathKey, (pathFrequencies.get(pathKey) || 0) + 1);
                             }
                             // Record time delta
-                            getOrSet(
-                                allTimeDeltas,
-                                `${toFullStateKey(from)}->${pathKey}`,
-                                []
-                            ).push(to.date.getTime() - from.date.getTime());
+                            allTimeDeltas.addDelta(
+                                `${from.key}->${pathKey}`,
+                                to.date.getTime() - from.date.getTime()
+                            );
                         }
                     }
                 }
@@ -216,53 +255,25 @@ async function main() {
     );
     console.log(`Processed all history; found ${allTimeDeltas.size} unique time delta keys. Computing median times...`);
 
-    const medianPathTimes = new Map<TimeDeltaKey, number>();
-    for (const [key, deltas] of allTimeDeltas.entries()) {
-        deltas.sort((a, b) => a - b);
-        const mid = Math.floor(deltas.length / 2);
-        const median = deltas.length % 2 !== 0 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
-        medianPathTimes.set(key, median);
-    }
+    const medianPathTimes = allTimeDeltas.computeMedians();
     console.log("Computed median times. Computing usual paths...");
-
-    const usualPaths = new Map<LocationCode, Map<StationCode, PathKey>>(); // Current location -> Destination -> Usual path
-    for (const locationCode of pathFrequencyMatrix.keys()) {
-        const destinationToPathFrequencies = pathFrequencyMatrix.get(locationCode)!;
-        const destinationToUsualPath = new Map<LocationCode, PathKey>();
-        for (const [destination, pathFrequencies] of destinationToPathFrequencies.entries()) {
-            const usualPath = findMostFrequentKeyInFrequencyMap(pathFrequencies);
-            if (usualPath) {
-                destinationToUsualPath.set(destination, usualPath);
-            }
-        }
-        usualPaths.set(locationCode, destinationToUsualPath);
-    }
+    const usualPaths = pathFrequencyMatrix.computeUsualPaths();
     console.log("Computed usual paths. Computing usual destinations...");
-
-    const usualDestinations = new Map<LocationCode, Map<LocationCode, LocationCode>>(); // Starting location -> Current location -> Usual final destination
-    for (const [startingLocation, currentLocationMap] of destinationFrequencyMatrix.entries()) {
-        const currentToUsualDestination = new Map<LocationCode, LocationCode>();
-        for (const [currentLocation, destinationFrequencies] of currentLocationMap.entries()) {
-            const usualDestination = findMostFrequentKeyInFrequencyMap(destinationFrequencies);
-            if (usualDestination) {
-                currentToUsualDestination.set(currentLocation, usualDestination);
-            }
-        }
-        usualDestinations.set(startingLocation, currentToUsualDestination);
-    }
+    const usualDestinations = destinationFrequencyMatrix.computeUsualDestinations();
     console.log("Computed usual destinations. Saving models...");
 
-    await fs.writeFile('models/medianPathTimes.json', JSON.stringify(Object.fromEntries(medianPathTimes)));
-    await fs.writeFile('models/usualPaths.json', JSON.stringify(
-        Object.fromEntries(
-            Array.from(usualPaths.entries()).map(([k, v]) => [k, Object.fromEntries(v)])
-        )
-    ));
-    await fs.writeFile('models/usualDestinations.json', JSON.stringify(
-        Object.fromEntries(
-            Array.from(usualDestinations.entries()).map(([k, v]) => [k, Object.fromEntries(v)])
-        )
-    ));
+    await fs.writeFile(
+        'models/medianPathTimes.json',
+        JSON.stringify(medianPathTimes)
+    );
+    await fs.writeFile(
+        'models/usualPaths.json',
+        JSON.stringify(usualPaths)
+    );
+    await fs.writeFile(
+        'models/usualDestinations.json',
+        JSON.stringify(usualDestinations)
+    );
     console.log("Saved models to files. Done.");
 }
 
