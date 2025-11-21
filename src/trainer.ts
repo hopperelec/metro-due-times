@@ -261,7 +261,7 @@ async function main() {
     const usualDestinations = destinationFrequencyMatrix.computeUsualDestinations();
     console.log("Computed usual destinations. Saving models...");
 
-    await fs.mkdir('models');
+    await fs.mkdir('models', { recursive: true });
     await fs.writeFile(
         'models/medianPathTimes.json',
         JSON.stringify(medianPathTimes)
