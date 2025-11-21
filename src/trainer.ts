@@ -185,9 +185,9 @@ async function main() {
                         currentJourney = [];
                         continue;
                     }
-                    // Add current data to recent data
+                    // Add current state to journey
                     currentJourney.push(fullState);
-                    // Analyze recent data for paths and destinations
+                    // Analyze recent states for paths and destinations
                     if (currentJourney.length >= 2) {
                         const prevEntry = currentJourney[currentJourney.length - 2];
                         const prevLocationCode = prevEntry.locationCode;
@@ -200,21 +200,21 @@ async function main() {
                         } else if (!NETWORK_GRAPH[prevLocationCode]?.includes(fullState.locationCode)) {
                             currentJourney = [];
                         // If the current station was seen recently, assume the previous location was a terminus
-                        } else if (currentJourney.some(entry =>
-                                entry !== fullState &&
-                                entry.stationCode === fullState.stationCode
+                        } else if (currentJourney.some(pastState =>
+                                pastState !== fullState &&
+                                pastState.stationCode === fullState.stationCode
                         )) {
                             const startingLocationCode = currentJourney[0].locationCode;
-                            // Add to destination frequencies for all previous recent locations
-                            for (const recentLocation of currentJourney) {
-                                const recentLocationCode = recentLocation.locationCode;
+                            // Add to destination frequencies for all previous locations
+                            for (const pastState of currentJourney) {
+                                const recentLocationCode = pastState.locationCode;
                                 destinationFrequencyMatrix.addDestinationFrequency(
                                     startingLocationCode,
                                     recentLocationCode,
                                     fullState.locationCode
                                 );
                             }
-                            // Restart recent data from the last location
+                            // Restart journey from the last location
                             currentJourney = [prevEntry, fullState];
                         }
                         // If the latest state is "Arrived", compare with all previous recent stations to build paths
