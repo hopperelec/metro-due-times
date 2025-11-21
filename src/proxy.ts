@@ -25,7 +25,7 @@ export async function reloadApiConstants() {
 
 export async function getStationCode(station: string, platform: PlatformNumber): Promise<StationCode> {
     if (!stationToCode) await reloadApiConstants();
-    if (station === "MMT") return platform <= 2 ? "MTS" : "MTW";
+    if (station === "Monument") return platform <= 2 ? "MTS" : "MTW";
     const code = stationToCode[station];
     if (code) return code;
     throw new Error(`Unrecognised station: ${station}`);
