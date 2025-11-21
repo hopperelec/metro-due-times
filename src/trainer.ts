@@ -5,12 +5,12 @@ import {
     parseTimesAPILocation, PlatformNumber,
     TimesApiData
 } from "metro-api-client";
-import NETWORK_GRAPH from './pop-network.json';
 import fs from "fs/promises";
 import {StationCode, LocationCode, FullStateKey, PathKey, TimeDeltaKey} from "./types";
 import proxy, {apiConstants, getStationCode, reloadApiConstants} from "./proxy";
 import {MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
 import {findMostFrequentKeyInFrequencyMap, getOrSet, toLocationCode} from "./utils";
+import {isAdjacent} from "./network-graph";
 
 class FullState {
     state: ActiveTrainState;
@@ -197,7 +197,7 @@ async function main() {
                                 continue;
                             }
                         // Reset the current journey if the latest location is not adjacent to the last one
-                        } else if (!NETWORK_GRAPH[prevLocationCode]?.includes(fullState.locationCode)) {
+                        } else if (!isAdjacent(prevLocationCode,fullState.locationCode)) {
                             currentJourney = [];
                         // If the current station was seen recently, assume the previous location was a terminus
                         } else if (currentJourney.some(pastState =>
@@ -218,21 +218,20 @@ async function main() {
                             currentJourney = [prevEntry, fullState];
                         }
                         // If the latest state is "Arrived", compare with all previous recent stations to build paths
-                        for (let i = 0; i < currentJourney.length - 1; i++) {
+                        for (let i = 1; i < currentJourney.length; i++) {
                             const from = currentJourney[i];
-                            const fromLocationCode = from.locationCode;
                             const to = fullState;
                             const journeyLocationCodes = currentJourney
-                                .slice(i + 1)
+                                .slice(i)
                                 .map(loc => loc.locationCode)
                                 // Collapse consecutive duplicates
                                 .filter((code, index, arr) => index === 0 || code !== arr[index - 1]);
                             const pathKey = journeyLocationCodes.join("->");
                             // Add to path frequency matrix
-                            if (fromLocationCode !== journeyLocationCodes[journeyLocationCodes.length - 1]) {
+                            if (from.locationCode !== journeyLocationCodes[journeyLocationCodes.length - 1]) {
                                 // Path only depends on location, not on state
                                 pathFrequencyMatrix.addPath(
-                                    fromLocationCode,
+                                    from.locationCode,
                                     to.stationCode,
                                     pathKey
                                 );
