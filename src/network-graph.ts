@@ -1,10 +1,16 @@
 import NETWORK_JSON from './pop-network.json';
 import {LocationCode} from "./types";
 
-export default NETWORK_JSON as Record<LocationCode, LocationCode[]>;
+const network: Record<LocationCode, Set<LocationCode>> = {};
+
+for (const [from, toList] of Object.entries(NETWORK_JSON)) {
+    network[from as LocationCode] = new Set(toList);
+}
+
+export default network;
 
 export function isAdjacent(from: LocationCode, to: LocationCode): boolean {
-    const adjacentLocations = NETWORK_JSON[from];
+    const adjacentLocations = network[from];
     if (!adjacentLocations) return false;
-    return adjacentLocations.includes(to);
+    return adjacentLocations.has(to);
 }
