@@ -11,6 +11,9 @@ import proxy, {apiConstants, getStationCode, reloadApiConstants} from "./proxy";
 import {MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
 import {findMostFrequentKeyInFrequencyMap, getOrSet, toLocationCode} from "./utils";
 import {isAdjacent} from "./network-graph";
+import pLimit from "p-limit";
+
+const MAX_CONCURRENT_REQUESTS = 5;
 
 class FullState {
     state: ActiveTrainState;
@@ -159,8 +162,9 @@ async function main() {
     const allTimeDeltas = new TimeDeltaMap();
     const pathFrequencyMatrix = new PathFrequencyMatrix();
     const destinationFrequencyMatrix = new DestinationFrequencyMatrix();
-    await Promise.all(
-        Object.keys(historySummary.trains).map(async trn => {
+    await pLimit(MAX_CONCURRENT_REQUESTS).map(
+        Object.keys(historySummary.trains),
+        async trn => {
             let latestTimestamp = new Date(0);
             let currentJourney: FullState[] = [];
             while (true) {
@@ -250,7 +254,7 @@ async function main() {
                 }
             }
             console.log(`Processed all history for T${trn}`);
-        })
+        }
     );
     console.log(`Processed all history; found ${allTimeDeltas.size} unique time delta keys. Computing median times...`);
 

@@ -14,6 +14,9 @@ importers:
       metro-api-client:
         specifier: ^3.0.1
         version: 3.0.1
+      p-limit:
+        specifier: ^7.2.0
+        version: 7.2.0
     devDependencies:
       '@types/node':
         specifier: ^24.5.2
@@ -217,6 +220,10 @@ packages:
   metro-api-client@3.0.1:
     resolution: {integrity: sha512-rv0PfQ+eva6XX6xETZ+cT83Ds5isnuUGuCOjwHiwU5zTagY2UEMuwURTI8Rgi7jvjjtnWpPB+wUQ/eHZLMiIoA==}
 
+  p-limit@7.2.0:
+    resolution: {integrity: sha512-ATHLtwoTNDloHRFFxFJdHnG6n2WUeFjaR8XQMFdKIv0xkXjrER8/iG9iu265jOM95zXHAfv9oTkqhrfbIzosrQ==}
+    engines: {node: '>=20'}
+
   resolve-pkg-maps@1.0.0:
     resolution: {integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==}
 
@@ -235,6 +242,10 @@ packages:
 
   undici-types@7.16.0:
     resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
+
+  yocto-queue@1.2.2:
+    resolution: {integrity: sha512-4LCcse/U2MHZ63HAJVE+v71o7yOdIe4cZ70Wpf8D/IyjDKYQLV5GD46B+hSTjJsvV5PztjvHoU580EftxjDZFQ==}
+    engines: {node: '>=12.20'}
 
 snapshots:
 
@@ -368,6 +379,10 @@ snapshots:
     dependencies:
       eventsource-client: 1.2.0
 
+  p-limit@7.2.0:
+    dependencies:
+      yocto-queue: 1.2.2
+
   resolve-pkg-maps@1.0.0: {}
 
   tslib@2.8.1: {}
@@ -382,3 +397,5 @@ snapshots:
   typescript@5.9.3: {}
 
   undici-types@7.16.0: {}
+
+  yocto-queue@1.2.2: {}
