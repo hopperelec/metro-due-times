@@ -1,5 +1,84 @@
-import {LocationCode, PathKey, StationCode, TimeDeltaKey} from "./types";
-import {getOrSet} from "./utils";
+import {FullStateKey, LocationCode, PathKey, StationCode, TimeDeltaKey} from "./types";
+import {getOrSet, toLocationCode} from "./utils";
+import {
+    ActiveTrainHistoryStatus,
+    ActiveTrainState, ParsedLastSeen, parseLastSeen,
+    parseTimesAPILocation,
+    PlatformNumber,
+    TimesApiData
+} from "metro-api-client";
+import {getStationCode} from "./proxy";
+
+export class FullState {
+    readonly state: ActiveTrainState;
+    readonly stationCode: StationCode;
+    readonly platform: PlatformNumber;
+    readonly date: Date;
+
+    constructor(state: ActiveTrainState, stationCode: StationCode, platform: PlatformNumber, date: Date) {
+        this.state = state;
+        this.stationCode = stationCode;
+        this.platform = platform;
+        this.date = date;
+    }
+
+    get locationCode(): LocationCode {
+        return toLocationCode(this.stationCode, this.platform);
+    }
+
+    get key(): FullStateKey {
+        return `${this.state}-${this.locationCode}`;
+    }
+
+    static async fromActiveTrainHistoryStatus(status: ActiveTrainHistoryStatus, heartbeatDate: Date): Promise<FullState> {
+        const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+
+        async function formatTimesApi(event: TimesApiData['lastEvent']): Promise<FullState> {
+            const {station, platform} = parseTimesAPILocation(event.location);
+            let state = event.type.toLowerCase().replaceAll('_', ' ');
+            state = state[0].toUpperCase() + state.slice(1); // Capitalize first letter
+            return new FullState(
+                state as ActiveTrainState,
+                await getStationCode(station, platform),
+                platform,
+                event.time,
+            );
+        }
+
+        async function formatGeoApi(parsedLastSeen: ParsedLastSeen, date: Date): Promise<FullState> {
+            return new FullState(
+                parsedLastSeen.state,
+                await getStationCode(parsedLastSeen.station, parsedLastSeen.platform),
+                parsedLastSeen.platform,
+                date,
+            );
+        }
+
+        const timesApi = status.timesAPI?.lastEvent;
+        const geoApiString = status.trainStatusesAPI?.lastSeen;
+
+        if (!geoApiString) {
+            return formatTimesApi(timesApi);
+        }
+
+        const geoData = parseLastSeen(geoApiString);
+        const geoDate = new Date(heartbeatDate);
+        geoDate.setHours(geoData.hours, geoData.minutes, 0, 0);
+
+        // Adjust geoDate to be within 12 hours of heartbeatDate
+        const diff = geoDate.getTime() - heartbeatDate.getTime();
+        if (diff < -TWELVE_HOURS_MS) {
+            geoDate.setDate(geoDate.getDate() + 1);
+        } else if (diff > TWELVE_HOURS_MS) {
+            geoDate.setDate(geoDate.getDate() - 1);
+        }
+
+        if (!timesApi || geoDate.getTime() > timesApi.time.getTime()) {
+            return formatGeoApi(geoData, geoDate);
+        }
+        return formatTimesApi(timesApi);
+    }
+}
 
 // TimeDeltaKey -> Median time delta (in ms)
 export class MedianTimeDeltas extends Map<TimeDeltaKey, number> {
@@ -26,17 +105,21 @@ export class MedianTimeDeltas extends Map<TimeDeltaKey, number> {
 }
 
 // Current location -> Destination -> Usual path
-export class UsualPaths extends Map<StationCode, Map<StationCode, PathKey>> {
-    setUsualPath(from: StationCode, to: StationCode, path: PathKey) {
+export class UsualPaths extends Map<LocationCode, Map<StationCode, PathKey>> {
+    setUsualPath(from: LocationCode, to: StationCode, path: PathKey) {
         getOrSet(this, from, new Map()).set(to, path);
     }
 
-    getUsualPath(from: StationCode, to: StationCode): PathKey {
+    getUsualPathKey(from: LocationCode, to: StationCode): PathKey {
         return this.get(from)?.get(to);
     }
 
+    getUsualPath(from: LocationCode, to: StationCode): LocationCode[] {
+        return this.getUsualPathKey(from, to)?.split('->');
+    }
+
     toJSON(): object {
-        const obj: Record<StationCode, Record<StationCode, PathKey>> = {};
+        const obj: Record<LocationCode, Record<StationCode, PathKey>> = {};
         for (const [from, toMap] of this.entries()) {
             obj[from] = {};
             for (const [to, path] of toMap.entries()) {

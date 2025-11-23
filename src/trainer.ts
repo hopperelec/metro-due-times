@@ -1,90 +1,12 @@
-import {
-    ActiveTrainHistoryStatus, ActiveTrainState,
-    ParsedLastSeen,
-    parseLastSeen,
-    parseTimesAPILocation, PlatformNumber,
-    TimesApiData
-} from "metro-api-client";
 import fs from "fs/promises";
-import {StationCode, LocationCode, FullStateKey, PathKey, TimeDeltaKey} from "./types";
-import proxy, {apiConstants, getStationCode, reloadApiConstants} from "./proxy";
-import {MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
-import {findMostFrequentKeyInFrequencyMap, getOrSet, toLocationCode} from "./utils";
+import {StationCode, LocationCode, PathKey, TimeDeltaKey} from "./types";
+import proxy, {apiConstants, reloadApiConstants} from "./proxy";
+import {FullState, MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
+import {findMostFrequentKeyInFrequencyMap, getOrSet} from "./utils";
 import {isAdjacent} from "./network-graph";
 import pLimit from "p-limit";
 
 const MAX_CONCURRENT_REQUESTS = 5;
-
-class FullState {
-    state: ActiveTrainState;
-    stationCode: StationCode;
-    platform: PlatformNumber;
-    date: Date;
-    
-    constructor(state: ActiveTrainState, stationCode: StationCode, platform: PlatformNumber, date: Date) {
-        this.state = state;
-        this.stationCode = stationCode;
-        this.platform = platform;
-        this.date = date;
-    }
-    
-    get locationCode(): LocationCode {
-        return toLocationCode(this.stationCode, this.platform);
-    }
-
-    get key(): FullStateKey {
-        return `${this.state}-${this.locationCode}`;
-    }
-
-    static async fromActiveTrainHistoryStatus(status: ActiveTrainHistoryStatus, heartbeatDate: Date): Promise<FullState> {
-        const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
-
-        async function formatTimesApi(event: TimesApiData['lastEvent']): Promise<FullState> {
-            const {station, platform} = parseTimesAPILocation(event.location);
-            let state = event.type.toLowerCase().replaceAll('_', ' ');
-            state = state[0].toUpperCase() + state.slice(1); // Capitalize first letter
-            return new FullState(
-                state as ActiveTrainState,
-                await getStationCode(station, platform),
-                platform,
-                event.time,
-            );
-        }
-
-        async function formatGeoApi(parsedLastSeen: ParsedLastSeen, date: Date): Promise<FullState> {
-            return new FullState(
-                parsedLastSeen.state,
-                await getStationCode(parsedLastSeen.station, parsedLastSeen.platform),
-                parsedLastSeen.platform,
-                date,
-            );
-        }
-
-        const timesApi = status.timesAPI?.lastEvent;
-        const geoApiString = status.trainStatusesAPI?.lastSeen;
-
-        if (!geoApiString) {
-            return formatTimesApi(timesApi);
-        }
-
-        const geoData = parseLastSeen(geoApiString);
-        const geoDate = new Date(heartbeatDate);
-        geoDate.setHours(geoData.hours, geoData.minutes, 0, 0);
-
-        // Adjust geoDate to be within 12 hours of heartbeatDate
-        const diff = geoDate.getTime() - heartbeatDate.getTime();
-        if (diff < -TWELVE_HOURS_MS) {
-            geoDate.setDate(geoDate.getDate() + 1);
-        } else if (diff > TWELVE_HOURS_MS) {
-            geoDate.setDate(geoDate.getDate() - 1);
-        }
-
-        if (!timesApi || geoDate.getTime() > timesApi.time.getTime()) {
-            return formatGeoApi(geoData, geoDate);
-        }
-        return formatTimesApi(timesApi);
-    }
-}
 
 // TimeDeltaKey -> List of time deltas (in ms)
 class TimeDeltaMap extends Map<TimeDeltaKey, number[]> {
@@ -171,15 +93,11 @@ async function main() {
                 const history = await proxy.getTrainHistory(trn, {
                     time: { from: new Date(latestTimestamp.getTime() + 1) },
                     limit: apiConstants.MAX_HISTORY_REQUEST_LIMIT,
+                    active: true,
                 });
                 if (history.extract.length === 0) break;
                 latestTimestamp = history.extract[history.extract.length - 1].date;
                 for (const entry of history.extract) {
-                    // Reset the current journey if entry is inactive
-                    if (!entry.active) {
-                        currentJourney = [];
-                        continue;
-                    }
                     // Identify most recent/precise last seen
                     let fullState: FullState;
                     try {
@@ -215,36 +133,42 @@ async function main() {
                                 destinationFrequencyMatrix.addDestinationFrequency(
                                     startingLocationCode,
                                     recentLocationCode,
-                                    fullState.locationCode
+                                    prevLocationCode
                                 );
                             }
                             // Restart journey from the last location
                             currentJourney = [prevEntry, fullState];
                         }
-                        // If the latest state is "Arrived", compare with all previous recent stations to build paths
-                        for (let i = 1; i < currentJourney.length; i++) {
-                            const from = currentJourney[i];
-                            const to = fullState;
-                            const journeyLocationCodes = currentJourney
-                                .slice(i)
-                                .map(loc => loc.locationCode)
-                                // Collapse consecutive duplicates
-                                .filter((code, index, arr) => index === 0 || code !== arr[index - 1]);
-                            const pathKey = journeyLocationCodes.join("->");
-                            // Add to path frequency matrix
-                            if (from.locationCode !== journeyLocationCodes[journeyLocationCodes.length - 1]) {
-                                // Path only depends on location, not on state
-                                pathFrequencyMatrix.addPath(
-                                    from.locationCode,
-                                    to.stationCode,
-                                    pathKey
+                        if (fullState.state === "Arrived") {
+                            // Compare with all previous states to build paths
+                            for (let i = 0; i < currentJourney.length - 1; i++) {
+                                const from = currentJourney[i];
+                                const to = fullState;
+                                const journeyLocationCodes = currentJourney
+                                    .slice(i)
+                                    .map(loc => loc.locationCode)
+                                    // Collapse consecutive duplicates
+                                    .filter((code, index, arr) => index === 0 || code !== arr[index - 1]);
+                                if (journeyLocationCodes.length > 1) {
+                                    // Remove `from` location, which is only kept for e.g. `Approaching-ABC_1->ABC_1`
+                                    journeyLocationCodes.shift();
+                                }
+                                const pathKey = journeyLocationCodes.join("->");
+                                // Add to path frequency matrix
+                                if (from.locationCode !== journeyLocationCodes[journeyLocationCodes.length - 1]) {
+                                    // Path only depends on location, not on state
+                                    pathFrequencyMatrix.addPath(
+                                        from.locationCode,
+                                        to.stationCode,
+                                        pathKey
+                                    );
+                                }
+                                // Record time delta
+                                allTimeDeltas.addDelta(
+                                    `${from.key}->${pathKey}`,
+                                    to.date.getTime() - from.date.getTime()
                                 );
                             }
-                            // Record time delta
-                            allTimeDeltas.addDelta(
-                                `${from.key}->${pathKey}`,
-                                to.date.getTime() - from.date.getTime()
-                            );
                         }
                     }
                 }
