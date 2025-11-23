@@ -113,9 +113,15 @@ async function main() {
                     if (currentJourney.length >= 2) {
                         const prevEntry = currentJourney[currentJourney.length - 2];
                         const prevLocationCode = prevEntry.locationCode;
+                        if (prevEntry.date.getTime() >= fullState.date.getTime()) {
+                            // Out of order entry. This shouldn't happen, but somehow does. Skip.
+                            currentJourney.pop();
+                            continue;
+                        }
                         if (fullState.locationCode === prevLocationCode) {
                             if (fullState.state === prevEntry.state) {
                                 // Duplicate entry; skip entirely
+                                currentJourney.pop();
                                 continue;
                             }
                         // Reset the current journey if the latest location is not adjacent to the last one
