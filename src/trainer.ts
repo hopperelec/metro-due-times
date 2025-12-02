@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import {StationCode, LocationCode, PathKey, TimeDeltaKey} from "./types";
-import proxy, {apiConstants, reloadApiConstants} from "./proxy";
+import proxy, {getApiConstants} from "./proxy";
 import {FullState, MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
 import {findMostFrequentKeyInFrequencyMap, getOrSet} from "./utils";
 import {isAdjacent} from "./network-graph";
@@ -75,7 +75,7 @@ class DestinationFrequencyMatrix extends Map<LocationCode, Map<LocationCode, Map
 
 async function main() {
     console.log("Fetching API constants...");
-    await reloadApiConstants();
+    const apiConstants = await getApiConstants();
 
     console.log("Fetched API constants. Fetching history summary...");
     const historySummary = await proxy.getHistorySummary();

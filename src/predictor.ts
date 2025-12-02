@@ -1,10 +1,10 @@
 import {readFile} from "node:fs/promises";
 import {FullState, MedianTimeDeltas, UsualDestinations, UsualPaths} from "./models";
-import {TrainTimetable} from "metro-api-client";
+import {DayTimetable, FullTrainsResponse, TrainTimetable} from "metro-api-client";
 import {LocationCode, StationCode} from "./types";
 import {locationsMatch, parseLocation, toSecondsSinceMidnight} from "./utils";
 import {shortestPath} from "./network-graph";
-import proxy from "./proxy";
+import proxy, {getApiConstants} from "./proxy";
 
 export const PREDICTION_WINDOW = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
 export const TIMETABLE_THRESHOLD = 15 * 60;  // 15 minutes in seconds
@@ -127,8 +127,78 @@ export class Predictor {
     }
 }
 
+async function staticDemo(predictor: Predictor, timetable: DayTimetable) {
+    const date = new Date(2025, 10, 21, 16, 30, 30); // Nov 23, 2025, 16:30:30
+    console.log(predictor.predictNextArrivals(
+        date,
+        new FullState("Departed", "HOW", 2, date),
+        "SSS_2",
+        "SJM",
+        timetable.trains["121"]
+    ));
+}
+
+async function realtimeDemo(predictor: Predictor, timetable: DayTimetable) {
+    console.log("Fetching current train states...");
+    const currentStates = await proxy.getTrains() as FullTrainsResponse;
+
+    console.log("Fetching recent locations...");
+    const recentLocations: Record<string, LocationCode[]> = {};
+    for (const trn of Object.keys(currentStates.trains)) {
+        recentLocations[trn] = [];
+        // TODO: Paginate
+        const history = await proxy.getTrainHistory(trn, {
+            limit: (await getApiConstants()).MAX_HISTORY_REQUEST_LIMIT,
+            active: true,
+        });
+        for (const entry of history.extract.toReversed()) {
+            const {locationCode} = await FullState.fromActiveTrainHistoryStatus(entry.status, entry.date);
+            if (recentLocations[trn].includes(locationCode)) {
+                break;
+            } else {
+                recentLocations[trn].unshift(locationCode);
+            }
+        }
+    }
+
+    console.log("Predicting arrivals...");
+    const trainsPredictions: Record<string, ArrivalPrediction[]> = {};
+    for (const [trn,state] of Object.entries(currentStates.trains)) {
+        try {
+            const fullState = await FullState.fromActiveTrainHistoryStatus(state.status, currentStates.lastChecked);
+            trainsPredictions[trn] = predictor.predictNextArrivals(
+                currentStates.lastChecked,
+                fullState,
+                recentLocations[trn][0] || fullState.locationCode,
+                null, // TODO: destination
+                timetable.trains[trn] || null
+            );
+        } catch (e) {
+            console.warn(`Could not predict next arrivals for train T${trn}: ${e.message}`);
+        }
+    }
+
+    // Example usage: Find next trains due at a specific platform
+    // TODO: The results aren't as expected, need to debug
+    const targetLocation: LocationCode = "HDR_2";
+    const arrivalsAtTarget: {trn: string; time: Date}[] = [];
+    for (const [trn, trainPredictions] of Object.entries(trainsPredictions)) {
+        for (const prediction of trainPredictions) {
+            if (prediction.locationCode === targetLocation) {
+                arrivalsAtTarget.push({trn, time: prediction.time});
+                break;
+            }
+        }
+    }
+    arrivalsAtTarget.sort((a, b) => a.time.getTime() - b.time.getTime());
+    console.log(`Next arrivals at ${targetLocation}:`);
+    for (const arrival of arrivalsAtTarget.slice(0, 5)) {
+        console.log(`Train T${arrival.trn} at ${arrival.time.getHours().toString().padStart(2, '0')}:${arrival.time.getMinutes().toString().padStart(2, '0')}`);
+    }
+}
+
 async function main() {
-    // Example usage
+    console.log("Loading models...");
     const [
         medianPathTimes,
         usualPaths,
@@ -141,14 +211,12 @@ async function main() {
         proxy.getTimetable({date: new Date(2025, 10, 21)})
     ]);
     const predictor = new Predictor(medianPathTimes, usualPaths, usualDestinations);
-    const date = new Date(2025, 10, 21, 16, 30, 30); // Nov 23, 2025, 16:30:30
-    console.log(predictor.predictNextArrivals(
-        date,
-        new FullState("Departed", "HOW", 2, date),
-        "SSS_2",
-        "SJM",
-        timetable.trains["121"]
-    ));
+
+    console.log("Running static demo...");
+    await staticDemo(predictor, timetable);
+
+    console.log("Running realtime demo...");
+    await realtimeDemo(predictor, timetable);
 }
 
 main().catch((error) => {

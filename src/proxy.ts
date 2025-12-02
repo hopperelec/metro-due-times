@@ -12,7 +12,7 @@ const proxy = new MetroApiClient(PROXY_BASE_URL);
 
 export default proxy;
 
-export let apiConstants: ApiConstants | null = null;
+let apiConstants: ApiConstants | null = null;
 let stationToCode: Record<string, StationCode> | null = null;
 
 export async function reloadApiConstants() {
@@ -21,6 +21,11 @@ export async function reloadApiConstants() {
     for (const [code, name] of Object.entries(apiConstants.LOCATION_ABBREVIATIONS)) {
         stationToCode[name] = code;
     }
+}
+
+export async function getApiConstants(): Promise<ApiConstants> {
+    if (!apiConstants) await reloadApiConstants();
+    return apiConstants!;
 }
 
 export async function getStationCode(station: string, platform: PlatformNumber): Promise<StationCode> {
