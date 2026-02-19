@@ -53,7 +53,9 @@ export class Predictor {
                         const timeDiff = Math.abs(entryTime - secondsSinceMidnight);
                         if (timeDiff < smallestTimeDiff) {
                             smallestTimeDiff = timeDiff;
-                            destination = parseLocation(entry.destination).station; // ignore platform for destination
+                            const parsedDest = parseLocation(entry.destination);
+                            if (!parsedDest) continue;
+                            destination = parsedDest.station; // ignore platform for destination
                             if (destination === "MTN") destination = "MTS";
                             else if (destination === "MTE") destination = "MTW";
                         }
@@ -104,15 +106,16 @@ export class Predictor {
         }
 
         const lastLocation = path[path.length - 1];
-        const {station, platform} = parseLocation(lastLocation);
+        const parsedLocation = parseLocation(lastLocation);
+        if (!parsedLocation?.platform) return predictions;
         try {
             predictions.push(
                 ...this.predictNextArrivals(
                     heartbeatDate,
                     new FullState(
                         "Arrived",
-                        station,
-                        platform,
+                        parsedLocation.station,
+                        parsedLocation.platform,
                         predictions[predictions.length - 1].time
                     ),
                     lastLocation,
